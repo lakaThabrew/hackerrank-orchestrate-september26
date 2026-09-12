@@ -27,29 +27,29 @@ This document tracks the step-by-step implementation of the AI-powered financial
   - [x] Implement `amount_safe_to_pay` binary search / analytical solver subject to `minimum_balance_to_keep`.
   - [x] Implement `earliest_date_for_full_payment` search across the 90-day horizon.
 
-- [ ] **Task 4: Payment Plan Optimizer & Option Selector**
-  - [ ] Evaluate `full_payment` feasibility against user preferences.
-  - [ ] Evaluate seller installment options from `dataset/request_payment_options.csv` against user's `max_installment_months` and `desired_completion_date`.
-  - [ ] Evaluate 2-step `partial_payment` plans when allowed and beneficial.
-  - [ ] Evaluate permitted flexible spending changes (`stop:<id>` and `reduce_to:<id>:<amount>`).
-  - [ ] Apply the 6-level tie-breaking hierarchy:
+- [x] **Task 4: Payment Plan Optimizer & Option Selector**
+  - [x] Evaluate `full_payment` feasibility against user preferences.
+  - [x] Evaluate seller installment options from `dataset/request_payment_options.csv` against user's `max_installment_months` and `desired_completion_date`.
+  - [x] Evaluate 2-step `partial_payment` plans when allowed and beneficial.
+  - [x] Evaluate permitted flexible spending changes (`stop:<id>` and `reduce_to:<id>:<amount>`).
+  - [x] Apply the 6-level tie-breaking hierarchy:
     1. Complete by `desired_completion_date`.
     2. Require no spending changes.
     3. Minimize total payable amount.
     4. Start payment earlier.
     5. Fewer payments.
     6. Lowest `payment_option_id`.
-  - [ ] Implement grounded `decision_explanation` generator matching problem style.
+  - [x] Implement grounded `decision_explanation` generator matching problem style.
 
-- [ ] **Task 5: Validation Against `sample_requests.csv`**
-  - [ ] Implement evaluation script `code/evaluation/main.py`.
-  - [ ] Test the pipeline on all 25 benchmark cases in `dataset/sample_requests.csv`.
-  - [ ] Verify exact match on `affordability_status`, `recommended_payment_method`, `payment_plan`, `earliest_date_for_full_payment`, and `spending_changes_needed`.
-  - [ ] Validate numerical accuracy of `amount_safe_to_pay`.
+- [x] **Task 5: Validation Against `sample_requests.csv`**
+  - [x] Implement evaluation script `code/evaluation/main.py`.
+  - [x] Test the pipeline on all 25 benchmark cases in `dataset/sample_requests.csv`.
+  - [x] Verify exact match on `affordability_status`, `recommended_payment_method`, `payment_plan`, `earliest_date_for_full_payment`, and `spending_changes_needed`.
+  - [x] Validate numerical accuracy of `amount_safe_to_pay`.
 
-- [ ] **Task 6: Full-Dataset Run & Submission Packaging**
-  - [ ] Run end-to-end pipeline across all 250 requests in `dataset/requests.csv`.
-  - [ ] Generate root-level `output.csv` with strict schema validation.
-  - [ ] Generate `code/evaluation/usage_report.md` tracking model calls, tokens, and cost breakdown.
-  - [ ] Create submission package `code.zip` (excluding datasets, node_modules, and virtual environments).
-  - [ ] Validate final deliverables and verify compliance with submission guidelines.
+- [x] **Task 6: Full-Dataset Run & Submission Packaging**
+  - [x] Run end-to-end pipeline across all 250 requests in `dataset/requests.csv`.
+  - [x] Generate root-level `output.csv` with strict schema validation.
+  - [x] Generate `code/evaluation/usage_report.md` tracking model calls, tokens, and cost breakdown.
+  - [x] Create submission package `code.zip` (excluding datasets, node_modules, and virtual environments).
+  - [x] Validate final deliverables and verify compliance with submission guidelines.
