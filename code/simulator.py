@@ -12,6 +12,8 @@ Accurately projects a user's daily cashflow over a 90-day horizon:
 - Computes amount_safe_to_pay and earliest_date_for_full_payment subject to minimum_balance_to_keep
 """
 
+from message_processor import MessageProcessor
+from data_loader import DataLoader
 import calendar
 from datetime import datetime, timedelta
 import pandas as pd
