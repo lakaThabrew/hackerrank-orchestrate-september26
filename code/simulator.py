@@ -69,6 +69,7 @@ class FinancialSimulator:
         ]
         
         reserved_pending_sum = 0.0
+        reserved_event_ids = set()
         for _, pevt in pending_debits.iterrows():
             desc = str(pevt['description']).lower()
             if 'duplicate' in desc:
@@ -82,6 +83,7 @@ class FinancialSimulator:
                 pevt['amount'], pevt['currency'], home_curr, pevt['cash_date']
             )
             reserved_pending_sum += c_amt
+            reserved_event_ids.add(pevt['event_id'])
 
         starting_bal = avail - reserved_pending_sum
 
@@ -96,7 +98,7 @@ class FinancialSimulator:
 
         for _, fevt in known_future.iterrows():
             eid = fevt['event_id']
-            if eid in stopped_events:
+            if eid in stopped_events or eid in reserved_event_ids:
                 continue
             
             desc = str(fevt['description']).lower()
@@ -132,25 +134,36 @@ class FinancialSimulator:
             ].copy()
             
             past_sal = past_sal[
-                ~past_sal['description'].str.contains(r'arrears|bonus|komisi|penyesuaian|one-off', case=False, na=False)
+                ~past_sal['description'].str.contains(r'arrears|bonus|komisi|commission|penyesuaian|one-off', case=False, na=False)
             ]
 
             salary_streams = []
             if len(past_sal) > 0:
-                # Iterate from most recent to oldest to find distinct recurring streams (e.g. 15th vs 20th)
                 past_sal_sorted = past_sal.sort_values('cash_date', ascending=False)
                 for _, row in past_sal_sorted.iterrows():
+                    s_desc = row['description']
                     s_curr = row['currency']
-                    s_amt = self.loader.convert_to_home_currency(
-                        row['amount'], s_curr, home_curr, row['cash_date']
-                    )
+                    s_orig_amt = float(row['amount'])
                     s_day = datetime.strptime(row['cash_date'], '%Y-%m-%d').day
                     # If this day is within 3 days of an already added stream, it's the same stream over time
                     if any(abs(stream['day'] - s_day) <= 3 for stream in salary_streams):
                         continue
+
+                    # Require recurrence evidence before creating stream: >=2 events, scheduled future, or message adjustment
+                    matching_count = len(past_sal[past_sal['description'] == s_desc])
+                    has_support = (
+                        matching_count >= 2 or
+                        adj.get('salary_override') is not None or
+                        adj.get('salary_date_shift') is not None or
+                        len(adj_events[(adj_events['category'] == 'salary') & (adj_events['status'] == 'scheduled')]) > 0
+                    )
+                    if not has_support:
+                        continue
+
                     salary_streams.append({
-                        'description': row['description'],
-                        'amount': s_amt,
+                        'description': s_desc,
+                        'orig_amount': s_orig_amt,
+                        'currency': s_curr,
                         'day': s_day,
                         'last_date': row['cash_date']
                     })
@@ -163,13 +176,12 @@ class FinancialSimulator:
                     for s_desc, grp in fut_sal.groupby('description'):
                         row = grp.iloc[0]
                         s_curr = row['currency']
-                        s_amt = self.loader.convert_to_home_currency(
-                            row['amount'], s_curr, home_curr, row['cash_date']
-                        )
+                        s_orig_amt = float(row['amount'])
                         s_day = datetime.strptime(row['cash_date'], '%Y-%m-%d').day
                         salary_streams.append({
                             'description': s_desc,
-                            'amount': s_amt,
+                            'orig_amount': s_orig_amt,
+                            'currency': s_curr,
                             'day': s_day,
                             'last_date': row['cash_date']
                         })
@@ -180,7 +192,6 @@ class FinancialSimulator:
 
             arrears_remaining = adj.get('arrears_adjustment', 0.0)
             for stream in salary_streams:
-                s_amt = stream['amount']
                 s_day = stream['day']
                 is_first_cycle = True
 
@@ -203,11 +214,18 @@ class FinancialSimulator:
                             fevt['category'] == 'salary' and abs((datetime.strptime(fevt['cash_date'], '%Y-%m-%d') - p_dt).days) <= 3
                             for _, fevt in known_future.iterrows()
                         )
-                        if not already:
-                            cycle_amt = s_amt
+                        if already:
+                            is_first_cycle = False
+                        else:
+                            p_date_str = p_dt.strftime('%Y-%m-%d')
+                            cycle_amt = self.loader.convert_to_home_currency(
+                                stream['orig_amount'], stream['currency'], home_curr, p_date_str
+                            )
                             if adj.get('salary_override'):
-                                if is_first_cycle or not adj['salary_override'].get('temporary', False):
-                                    cycle_amt = adj['salary_override']['amount']
+                                eff_date = adj['salary_override'].get('effective_date')
+                                if eff_date is None or p_date_str >= eff_date:
+                                    if is_first_cycle or not adj['salary_override'].get('temporary', False):
+                                        cycle_amt = adj['salary_override']['amount']
 
                             if arrears_remaining > 0 and is_first_cycle:
                                 cycle_amt += arrears_remaining
@@ -232,6 +250,16 @@ class FinancialSimulator:
             if len(cat_events) == 0:
                 continue
 
+            # Require supported recurrence evidence: rent, >= 2 events, or recurring keyword in description
+            is_supported = (
+                cat == 'rent' or
+                len(cat_events) >= 2 or
+                any('subscription' in str(d).lower() or 'monthly' in str(d).lower() or 'membership' in str(d).lower()
+                    for d in cat_events['description'])
+            )
+            if not is_supported:
+                continue
+
             last_ev = cat_events.iloc[-1]
             eid = last_ev['event_id']
             if eid in stopped_events:
@@ -242,9 +270,6 @@ class FinancialSimulator:
                 base_amt *= adj['rent_multiplier']
 
             amt = reduced_events.get(eid, base_amt)
-            c_amt = self.loader.convert_to_home_currency(
-                amt, last_ev['currency'], home_curr, last_ev['cash_date']
-            )
             ev_dt = datetime.strptime(last_ev['cash_date'], '%Y-%m-%d')
             day_of_month = ev_dt.day
 
@@ -262,12 +287,15 @@ class FinancialSimulator:
                 cur_m = ((cur_m - 1) % 12) + 1
                 max_d = calendar.monthrange(cur_y, cur_m)[1]
                 p_dt = datetime(cur_y, cur_m, min(day_of_month, max_d))
-                if req_dt < p_dt <= end_dt:
+                if req_dt <= p_dt <= end_dt:
                     already = any(
                         fevt['category'] == cat and abs((datetime.strptime(fevt['cash_date'], '%Y-%m-%d') - p_dt).days) <= 3
                         for _, fevt in known_future.iterrows()
                     )
                     if not already:
+                        c_amt = self.loader.convert_to_home_currency(
+                            amt, last_ev['currency'], home_curr, p_dt.strftime('%Y-%m-%d')
+                        )
                         daily_outflows[p_dt] += c_amt
 
         # 5b. Extra recurring expense from messages (e.g. childcare)
@@ -279,21 +307,27 @@ class FinancialSimulator:
                 cat_past = hist_debits[hist_debits['category'] == extra_cat]
                 if len(cat_past) > 0:
                     extra_amt = float(cat_past.iloc[-1]['amount'])
-                else:
-                    currency_defaults = {'EUR': 200.0, 'USD': 175.0, 'INR': 12500.0, 'ZAR': 4000.0, 'IDR': 3000000.0}
-                    extra_amt = currency_defaults.get(home_curr, 200.0)
             
-            for m_off in range(0, 4):
-                cur_m = req_dt.month + m_off
-                cur_y = req_dt.year + (cur_m - 1) // 12
-                cur_m = ((cur_m - 1) % 12) + 1
-                max_d = calendar.monthrange(cur_y, cur_m)[1]
-                p_dt = datetime(cur_y, cur_m, min(15, max_d))
-                if req_dt < p_dt <= end_dt:
-                    daily_outflows[p_dt] += float(extra_amt)
+            # Only project if evidenced (do not invent unsupported defaults)
+            if extra_amt is not None:
+                for m_off in range(0, 4):
+                    cur_m = req_dt.month + m_off
+                    cur_y = req_dt.year + (cur_m - 1) // 12
+                    cur_m = ((cur_m - 1) % 12) + 1
+                    max_d = calendar.monthrange(cur_y, cur_m)[1]
+                    p_dt = datetime(cur_y, cur_m, min(15, max_d))
+                    if req_dt <= p_dt <= end_dt:
+                        daily_outflows[p_dt] += float(extra_amt)
 
-        # 6. Short-cycle essentials: groceries, transport (exclude discretionary one-offs like shopping/dining)
+        # 6. Short-cycle essentials: groceries, transport (and dining/food_delivery if user allows adjusting them)
+        prof = self.loader.get_user_profile(user_id)
+        willing_reduce = set(prof['expense_categories_user_is_willing_to_reduce'].split('|')) if pd.notna(prof['expense_categories_user_is_willing_to_reduce']) else set()
+        willing_stop = set(prof['expense_categories_user_is_willing_to_stop'].split('|')) if pd.notna(prof['expense_categories_user_is_willing_to_stop']) else set()
+
         short_cats = ['groceries', 'transport']
+        for c in ['dining', 'food_delivery']:
+            if c in willing_reduce or c in willing_stop:
+                short_cats.append(c)
         for cat in short_cats:
             cat_events = hist_debits[hist_debits['category'] == cat].sort_values('cash_date')
             if len(cat_events) < 2:
@@ -301,6 +335,16 @@ class FinancialSimulator:
             dates = [datetime.strptime(d, '%Y-%m-%d') for d in cat_events['cash_date']]
             diffs = [(dates[i] - dates[i-1]).days for i in range(1, len(dates))]
             median_interval = max(3, int(round(np.median(diffs))))
+            if median_interval > 20:
+                continue
+
+            # Check gap consistency and recency
+            if (req_dt - dates[-1]).days > median_interval * 2 + 7:
+                continue
+            if len(diffs) >= 2:
+                consistent_count = sum(1 for d in diffs if abs(d - median_interval) <= max(4, int(median_interval * 0.4)))
+                if consistent_count / len(diffs) < 0.5:
+                    continue
 
             last_date = dates[-1]
             last_ev = cat_events.iloc[-1]
@@ -310,13 +354,13 @@ class FinancialSimulator:
 
             default_amt = float(cat_events['amount'].tail(3).mean())
             amt = reduced_events.get(eid, default_amt)
-            c_amt = self.loader.convert_to_home_currency(
-                amt, last_ev['currency'], home_curr, last_ev['cash_date']
-            )
 
             p_dt = last_date + timedelta(days=median_interval)
             while p_dt <= end_dt:
-                if p_dt > req_dt:
+                if p_dt >= req_dt:
+                    c_amt = self.loader.convert_to_home_currency(
+                        amt, last_ev['currency'], home_curr, p_dt.strftime('%Y-%m-%d')
+                    )
                     daily_outflows[p_dt] += c_amt
                 p_dt += timedelta(days=median_interval)
 
@@ -355,9 +399,8 @@ class FinancialSimulator:
         trajectory, _, _ = self.simulate_trajectory(user_id, request_date, request_id=request_id)
         
         for idx, (day, _) in enumerate(trajectory):
-            # Evaluate across pay cycle (next 30 days) to avoid day 90 boundary artifacts
-            horizon_end = min(len(trajectory), idx + 31)
-            subsequent_bals = [b for _, b in trajectory[idx:horizon_end]]
+            # Evaluate across the entire remaining trajectory
+            subsequent_bals = [b for _, b in trajectory[idx:]]
             if len(subsequent_bals) > 0 and min(subsequent_bals) - req_amt >= min_bal:
                 return day.strftime('%Y-%m-%d')
 

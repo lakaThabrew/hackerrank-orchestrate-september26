@@ -46,4 +46,4 @@ The hybrid architecture executes multimodal extraction during dataset initializa
 - **Total Execution Time (250 requests):** ~45 seconds (~0.18 seconds per request).
 - **Memory Footprint:** < 150 MB RAM.
 - **Determinism:** 100% deterministic and reproducible across platforms.
-- **Data Privacy & Security:** Zero private data or financial records transmitted externally. All secret/credential requirements are strictly environment-variable backed.
+- **Data Privacy & Security:** Multimodal evidence processing is strictly confined to receipt and invoice image OCR calls; zero tabular database rows or personal user profiles were transmitted externally. All secret/credential requirements are strictly environment-variable backed.
