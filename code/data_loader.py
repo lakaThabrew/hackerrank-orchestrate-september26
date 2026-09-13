@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 import pandas as pd
 import numpy as np
 
@@ -94,20 +95,30 @@ class DataLoader:
         if len(inv_match) > 0:
             return 1.0 / float(inv_match.iloc[0]['rate'])
         
-        # If exact date not found, find nearest available date for this currency pair
+        # If exact date not found, find nearest available date for this currency pair by chronological proximity
         pair_matches = self.exchange_rates_df[
             (self.exchange_rates_df['from_currency'] == from_curr) &
             (self.exchange_rates_df['to_currency'] == to_curr)
         ]
         if len(pair_matches) > 0:
-            return float(pair_matches.iloc[-1]['rate'])
+            target_dt = datetime.strptime(rate_date_str, '%Y-%m-%d')
+            dists = pair_matches['rate_date'].apply(
+                lambda d: abs((datetime.strptime(str(d).strip(), '%Y-%m-%d') - target_dt).days)
+            )
+            closest_idx = dists.idxmin()
+            return float(pair_matches.loc[closest_idx, 'rate'])
 
         pair_inv = self.exchange_rates_df[
             (self.exchange_rates_df['from_currency'] == to_curr) &
             (self.exchange_rates_df['to_currency'] == from_curr)
         ]
         if len(pair_inv) > 0:
-            return 1.0 / float(pair_inv.iloc[-1]['rate'])
+            target_dt = datetime.strptime(rate_date_str, '%Y-%m-%d')
+            dists = pair_inv['rate_date'].apply(
+                lambda d: abs((datetime.strptime(str(d).strip(), '%Y-%m-%d') - target_dt).days)
+            )
+            closest_idx = dists.idxmin()
+            return 1.0 / float(pair_inv.loc[closest_idx, 'rate'])
 
         raise ValueError(f"No exchange rate found for {from_curr}->{to_curr} on {rate_date_str}")
 

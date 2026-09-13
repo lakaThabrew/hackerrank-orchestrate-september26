@@ -121,7 +121,10 @@ class MessageProcessor:
                     adjustments['salary_override'] = {'amount': conv_amt, 'effective_date': None, 'temporary': True}
 
             # 5b. Regular salary change / promotion
-            m_sal = re.search(r'(?:naik menjadi|gaji pokok.*adalah|first salary (?:will be|of)|regular salary (?:is now|of)|gaji bulanan.*?adalah|gaji bulanan Anda naik menjadi)\s*([A-Z]{3})?\s*([0-9,.]+)', text, re.I)
+            m_sal = re.search(
+                r'(?:naik menjadi|gaji pokok.*adalah|first salary (?:will be|of)|regular salary (?:is now|of)|monthly salary (?:has increased to|is now|is)|confirmed (?:base )?salary is|gaji bulanan.*?adalah|gaji bulanan Anda naik menjadi)\s*([A-Z]{3})?\s*([0-9,.]+)',
+                text, re.I
+            )
             m_sal_of = re.search(r'salary of\s*([A-Z]{3})?\s*([0-9,.]+)', text, re.I)
             
             chosen_sal_match = m_sal or m_sal_of
@@ -130,7 +133,7 @@ class MessageProcessor:
                 curr = chosen_sal_match.group(1)
                 if amt is not None:
                     eff_date = None
-                    eff_match = re.search(r'(\d{4}-\d{2}-\d{2})', text)
+                    eff_match = re.search(r'(?:effective|from|mulai|starting)?\s*(\d{4}-\d{2}-\d{2})', text, re.I)
                     if eff_match:
                         eff_date = eff_match.group(1)
                     conv_date = eff_date or request_date

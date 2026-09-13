@@ -11,6 +11,7 @@ Applies the mandatory 6-level tie-breaking hierarchy to select the optimal plan.
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
+import os
 
 def format_amount(val, currency):
     """
@@ -47,7 +48,11 @@ class PaymentPlanOptimizer:
         self.loader = data_loader
         self.processor = message_processor
         self.sim = simulator
-        self.options_df = pd.read_csv('dataset/request_payment_options.csv')
+        if hasattr(self.loader, 'payment_options_df') and self.loader.payment_options_df is not None:
+            self.options_df = self.loader.payment_options_df
+        else:
+            options_path = os.path.join(getattr(self.loader, 'data_dir', 'dataset'), 'request_payment_options.csv')
+            self.options_df = pd.read_csv(options_path)
 
     def get_payment_options_for_request(self, request_id):
         return self.options_df[self.options_df['request_id'] == request_id].copy()
@@ -72,9 +77,17 @@ class PaymentPlanOptimizer:
             willing_reduce = set(prof['expense_categories_user_is_willing_to_reduce'].split('|'))
 
         events = self.loader.get_user_events(user_id)
+        # Derive effective cash date
+        def get_cash_date(row):
+            s_date = row['settlement_date']
+            if pd.notna(s_date) and str(s_date).strip() != '':
+                return str(s_date).strip()
+            return str(row['event_date']).strip()
+
+        events['cash_date'] = events.apply(get_cash_date, axis=1)
         # Settle before or on request date
         hist = events[
-            (events['event_date'] <= request_date) &
+            (events['cash_date'] <= request_date) &
             (events['status'] == 'settled') &
             (events['flexibility'].isin(['stoppable', 'reducible', 'reducible_or_stoppable']))
         ].copy()
@@ -84,7 +97,7 @@ class PaymentPlanOptimizer:
         for (desc, cat), grp in hist.groupby(['description', 'category']):
             if cat in protected:
                 continue
-            last_ev = grp.sort_values('event_date').iloc[-1]
+            last_ev = grp.sort_values('cash_date').iloc[-1]
             eid = last_ev['event_id']
             flex = last_ev['flexibility']
             amt = float(last_ev['amount'])
@@ -170,18 +183,23 @@ class PaymentPlanOptimizer:
                     freq = int(opt['payment_frequency_days']) if pd.notna(opt['payment_frequency_days']) else 30
                     f_dt = datetime.strptime(opt['first_payment_date'], '%Y-%m-%d')
                     pdates = [(f_dt + timedelta(days=k * freq)).strftime('%Y-%m-%d') for k in range(num_pay)]
+                    
+                    # Validate date bounds: first payment >= rdate, completion <= cdate, within 90-day horizon
+                    horizon_end_str = (datetime.strptime(rdate, '%Y-%m-%d') + timedelta(days=90)).strftime('%Y-%m-%d')
+                    if pdates[0] < rdate or pdates[-1] > cdate or pdates[-1] > horizon_end_str:
+                        continue
+
                     pamt = float(opt['payment_amount'])
                     tot_payable = float(opt['total_payable_amount'])
 
-                    # Check safety of this installment plan through final payment date
+                    # Check safety of this installment plan through plan completion and user deadline
                     plan_dict = {d: pamt for d in pdates}
                     traj, min_b, _ = self.sim.simulate_trajectory(
                         uid, rdate, request_id=rid, payment_plan=plan_dict
                     )
-                    last_pay_date = pdates[-1]
-                    plan_traj = [b for d, b in traj if d.strftime('%Y-%m-%d') <= last_pay_date]
-                    plan_min_b = min(plan_traj)
-                    if plan_min_b >= min_bal:
+                    eval_end_date = max(pdates[-1], cdate)
+                    plan_traj = [b for d, b in traj if d.strftime('%Y-%m-%d') <= eval_end_date]
+                    if min(plan_traj) >= min_bal:
                         plan_str = '|'.join([f"{d}:{format_amount(pamt, curr)}" for d in pdates])
                         candidates.append({
                             'method': 'installments',
@@ -195,37 +213,43 @@ class PaymentPlanOptimizer:
                             'requires_changes': False,
                             'changes_desc': '',
                             'installment_amount': pamt,
-                            'min_avail_balance': plan_min_b
+                            'min_avail_balance': min_b
                         })
 
         # --- C. Partial Payment (no changes) ---
         if 'partial_payment' in user_methods and allows_partial:
             if 0 < safe_amt < ramt and earliest_full_date != "" and earliest_full_date <= cdate:
-                pay1 = safe_amt
-                pay2 = ramt - safe_amt
-                plan_dict = {rdate: pay1, earliest_full_date: pay2}
-                traj, min_b, _ = self.sim.simulate_trajectory(
-                    uid, rdate, request_id=rid, payment_plan=plan_dict
-                )
-                if min_b >= min_bal:
-                    plan_str = f"{rdate}:{format_amount(pay1, curr)}|{earliest_full_date}:{format_amount(pay2, curr)}"
-                    candidates.append({
-                        'method': 'partial_payment',
-                        'plan_str': plan_str,
-                        'total_payable': ramt,
-                        'first_payment_date': rdate,
-                        'completion_date': earliest_full_date,
-                        'number_of_payments': 2,
-                        'option_id': 'partial',
-                        'spending_changes': 'none',
-                        'requires_changes': False,
-                        'changes_desc': '',
-                        'pay1': pay1,
-                        'pay2': pay2
-                    })
+                if curr in ['IDR', 'INR', 'ZAR']:
+                    pay1 = float(round(safe_amt))
+                    pay2 = float(round(ramt) - round(pay1))
+                else:
+                    pay1 = float(round(safe_amt, 2))
+                    pay2 = float(round(ramt - pay1, 2))
+
+                if pay1 > 0 and pay2 > 0:
+                    plan_dict = {rdate: pay1, earliest_full_date: pay2}
+                    traj, min_b, _ = self.sim.simulate_trajectory(
+                        uid, rdate, request_id=rid, payment_plan=plan_dict
+                    )
+                    if min_b >= min_bal:
+                        plan_str = f"{rdate}:{format_amount(pay1, curr)}|{earliest_full_date}:{format_amount(pay2, curr)}"
+                        candidates.append({
+                            'method': 'partial_payment',
+                            'plan_str': plan_str,
+                            'total_payable': ramt,
+                            'first_payment_date': rdate,
+                            'completion_date': earliest_full_date,
+                            'number_of_payments': 2,
+                            'option_id': 'partial',
+                            'spending_changes': 'none',
+                            'requires_changes': False,
+                            'changes_desc': '',
+                            'pay1': pay1,
+                            'pay2': pay2
+                        })
 
         # --- D. Wait (no changes) ---
-        if 'full_payment' in user_methods and earliest_full_date != "" and earliest_full_date > rdate:
+        if 'full_payment' in user_methods and earliest_full_date != "" and rdate < earliest_full_date <= cdate:
             candidates.append({
                 'method': 'wait',
                 'plan_str': f"{earliest_full_date}:{format_amount(ramt, curr)}",
@@ -240,8 +264,6 @@ class PaymentPlanOptimizer:
             })
 
         # --- E. Evaluate Spending Changes (if needed) ---
-        # If no candidates complete by desired_completion_date without spending changes,
-        # explore flexible spending changes.
         viable_no_change = [c for c in candidates if c['completion_date'] <= cdate]
         if len(viable_no_change) == 0:
             flex_changes = self.find_flexible_spending_changes(uid, rdate)
@@ -253,6 +275,9 @@ class PaymentPlanOptimizer:
                 for j, c2 in enumerate(flex_changes[i+1:], i+1):
                     if c1['event_id'] != c2['event_id']:
                         change_combinations.append([c1, c2])
+                        for k, c3 in enumerate(flex_changes[j+1:], j+1):
+                            if c1['event_id'] != c3['event_id'] and c2['event_id'] != c3['event_id']:
+                                change_combinations.append([c1, c2, c3])
 
             for comb in change_combinations:
                 change_str = '|'.join([c['action_str'] for c in comb])
@@ -273,9 +298,13 @@ class PaymentPlanOptimizer:
                     
                     if len(desc_parts) == 1:
                         changes_desc = desc_parts[0]
+                    elif len(desc_parts) == 2:
+                        p2 = desc_parts[1][0].lower() + desc_parts[1][1:]
+                        changes_desc = f"{desc_parts[0]} and {p2}"
                     else:
-                        desc_parts[1] = desc_parts[1].lower() if desc_parts[1].startswith('Reduce') else desc_parts[1]
-                        changes_desc = f"{desc_parts[0]} and {desc_parts[1]}"
+                        p2 = desc_parts[1][0].lower() + desc_parts[1][1:]
+                        p3 = desc_parts[2][0].lower() + desc_parts[2][1:]
+                        changes_desc = f"{desc_parts[0]}, {p2}, and {p3}"
 
                     candidates.append({
                         'method': 'full_payment',
@@ -293,7 +322,9 @@ class PaymentPlanOptimizer:
 
         # --- Step 4: Rank Candidates according to 6-level hierarchy ---
         if len(candidates) == 0:
-            return self._build_not_affordable_result(rid, ramt, safe_amt, curr, cdate, min_bal)
+            return self._build_not_affordable_result(
+                rid, ramt, safe_amt, curr, cdate, min_bal, earliest_full_date=earliest_full_date
+            )
 
         def ranking_key(cand):
             completes_on_time = (cand['completion_date'] <= cdate)
@@ -317,7 +348,9 @@ class PaymentPlanOptimizer:
         # If the best plan cannot complete by deadline and requires changes or is not feasible,
         # verify if it should be not_affordable
         if best['completion_date'] > cdate and best['method'] != 'wait':
-            return self._build_not_affordable_result(rid, ramt, safe_amt, curr, cdate, min_bal)
+            return self._build_not_affordable_result(
+                rid, ramt, safe_amt, curr, cdate, min_bal, earliest_full_date=earliest_full_date
+            )
 
         # Build output fields
         method = best['method']
@@ -344,9 +377,13 @@ class PaymentPlanOptimizer:
             best, rid, uid, rdate, ramt, curr, min_bal, safe_amt, cdate, earliest_full_date
         )
 
+        safe_amt_out = safe_amt
+        if method == 'partial_payment' and 'pay1' in best:
+            safe_amt_out = best['pay1']
+
         return {
             'request_id': rid,
-            'amount_safe_to_pay': safe_amt,
+            'amount_safe_to_pay': safe_amt_out,
             'affordability_status': status,
             'recommended_payment_method': method,
             'payment_plan': plan_str,
@@ -355,10 +392,16 @@ class PaymentPlanOptimizer:
             'decision_explanation': explanation
         }
 
-    def _build_not_affordable_result(self, rid, ramt, safe_amt, curr, cdate, min_bal):
+    def _build_not_affordable_result(self, rid, ramt, safe_amt, curr, cdate, min_bal, earliest_full_date=""):
         cdate_text = format_date_text(cdate)
 
-        if safe_amt > 0:
+        if safe_amt >= ramt:
+            expl = (
+                f"Do not make this payment by {cdate_text}. "
+                f"Although the full amount is financially safe today, "
+                f"no eligible payment method is accepted by the user."
+            )
+        elif safe_amt > 0:
             expl = (
                 f"Do not proceed with the {format_currency_text(ramt, curr)} request. "
                 f"Although {format_currency_text(safe_amt, curr)} is available today, "
@@ -376,7 +419,7 @@ class PaymentPlanOptimizer:
             'affordability_status': 'not_affordable',
             'recommended_payment_method': 'not_recommended',
             'payment_plan': 'none',
-            'earliest_date_for_full_payment': '',
+            'earliest_date_for_full_payment': earliest_full_date,
             'spending_changes_needed': 'none',
             'decision_explanation': expl
         }

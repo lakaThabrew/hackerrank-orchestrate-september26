@@ -137,6 +137,14 @@ def run_evaluation(data_dir=None, verbose=True):
     print(f"  Amount Safe To Pay (Exact):       {metrics['safe_amt_exact_match']}/{total_cases} ({metrics['safe_amt_exact_match']/total_cases*100:.1f}%)")
     print(f"  Amount Safe To Pay (Within 5%):   {metrics['safe_amt_within_5pct']}/{total_cases} ({metrics['safe_amt_within_5pct']/total_cases*100:.1f}%)")
     print(f"  Mean Absolute Error (Safe Amt):   {np.mean(metrics['safe_amt_abs_diff']):.2f}")
+    all_matched = (
+        metrics['status_match'] == total_cases and
+        metrics['method_match'] == total_cases and
+        metrics['plan_match'] == total_cases and
+        metrics['earliest_date_match'] == total_cases and
+        metrics['spending_changes_match'] == total_cases
+    )
+    metrics['all_matched'] = all_matched
     print(f"============================================================\n")
 
     return metrics, results
@@ -145,6 +153,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Evaluate financial decision agent")
     parser.add_argument('--data_dir', type=str, default=None, help="Path to dataset directory")
     parser.add_argument('--quiet', action='store_true', help="Suppress per-request output")
+    parser.add_argument('--strict', action='store_true', help="Fail with exit code 1 if benchmark has any mismatches")
     args = parser.parse_args()
 
-    run_evaluation(data_dir=args.data_dir, verbose=not args.quiet)
+    metrics, results = run_evaluation(data_dir=args.data_dir, verbose=not args.quiet)
+    if args.strict and not metrics.get('all_matched', False):
+        print(f"FAILED strict benchmark validation: not all benchmark fields matched.")
+        sys.exit(1)
